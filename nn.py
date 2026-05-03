@@ -11,7 +11,7 @@ class Layer:
     activations: np.ndarray = None
 
 class NeuralNetwork:
-    def __init__(self, hidden_layers: list[int], n_inputs: int, n_outputs: int, activation_f_type: str, task: str = "multiclass", learning_rate: float = 0.01) -> None:
+    def __init__(self, hidden_layers: list[int], n_inputs: int, n_outputs: int, activation_f_type: str, task: str = "multiclass", apply_regularization: bool = False, learning_rate: float = 0.01, regularization_coef: float = 0.01) -> None:
         """Initialization function"""
         
         self.hidden_layers: list[Layer] = []
@@ -19,11 +19,14 @@ class NeuralNetwork:
         self.task = task
         self.learning_rate = learning_rate
         self.errors: list[float] = []
-
+        self.regularization_coef = regularization_coef
+        self.apply_regularization = apply_regularization
+        if apply_regularization:
+            print("Warning! Inputs must be scaled for regularization to work effectively")
         for i in range(len(hidden_layers)):
             input_size = n_inputs if i == 0 else hidden_layers[i - 1]
             W = np.random.randn(input_size, hidden_layers[i]) * np.sqrt(1 / input_size)
-            b = np.random.uniform(-1, 1, size=(hidden_layers[i],))
+            b = np.zeros((hidden_layers[i],))
             self.hidden_layers.append(Layer(id=i, incoming_weights=W, biases=b))
 
         output_input_size = hidden_layers[-1] if hidden_layers else n_inputs
@@ -55,12 +58,19 @@ class NeuralNetwork:
     def _cost_function(self, prediction: np.ndarray, target: np.ndarray) -> float:
         """Calculates error given a certain cost function"""
         
+        l1_penalty = 0.0
+        if self.apply_regularization:
+            for layer in self.hidden_layers:
+                l1_penalty += np.sum(np.abs(layer.incoming_weights))
+            l1_penalty += np.sum(np.abs(self.output_layer.incoming_weights))
+            l1_penalty *= self.regularization_coef 
+            
         if self.task == "multiclass":
-            return -np.mean(np.sum(target * np.log(prediction + 1e-9), axis=1))
+            return -np.mean(np.sum(target * np.log(prediction + 1e-9), axis=1)) + l1_penalty
         if self.task == "binary":
-            return -np.mean(target * np.log(prediction + 1e-9) + (1 - target) * np.log(1 - prediction + 1e-9))
+            return -np.mean(target * np.log(prediction + 1e-9) + (1 - target) * np.log(1 - prediction + 1e-9)) + l1_penalty
         if self.task == "regression":
-            return np.mean((prediction - target) ** 2)
+            return np.mean((prediction - target) ** 2) + l1_penalty
 
     def _d_activation_function(self, x: np.ndarray) -> np.ndarray:
         """Returns output of derivative of activation function for a certain type of activation function"""
@@ -70,7 +80,7 @@ class NeuralNetwork:
         if self.activation_f_type == "Sigmoid":
             return x * (1 - x)
         if self.activation_f_type == "Tanh":
-            return 1 - np.tanh(x) ** 2
+            return 1 - x ** 2
         
     def _d_cost_function(self, prediction: np.ndarray, target: np.ndarray) -> np.ndarray:
         """Returns output of the derivative of cost function for a certain type of cost function"""
@@ -124,15 +134,31 @@ class NeuralNetwork:
         prediction = self._forward_propagation(X)
         delta = self._d_cost_function(prediction, y)
         prev_act = self.hidden_layers[-1].activations if self.hidden_layers else X
-        dW_out = prev_act.T @ delta
+        dW_out = prev_act.T @ delta 
+        if self.apply_regularization:
+            dW_out += self.regularization_coef * np.sign(self.output_layer.incoming_weights)
         db_out = np.sum(delta, axis=0)
         
-        hidden_grads: list[np.ndarray] = []
+        hidden_grads: list[tuple[np.ndarray, np.ndarray]] = []
+        upstream_delta = delta 
+
         for i in range(len(self.hidden_layers) - 1, -1, -1):
-            next_weights = self.output_layer.incoming_weights if i == len(self.hidden_layers) - 1 else self.hidden_layers[i + 1].incoming_weights
-            delta = (delta @ next_weights.T) * self._d_activation_function(self.hidden_layers[i].activations)
-            prev_activations = X if i == 0 else self.hidden_layers[i - 1].activations
-            hidden_grads.append((prev_activations.T @ delta, np.sum(delta, axis=0)))
+            
+            if i == len(self.hidden_layers) - 1: next_weights = self.output_layer.incoming_weights 
+            else: next_weights = self.hidden_layers[i + 1].incoming_weights
+            
+            grad_activations = upstream_delta @ next_weights.T
+            local_delta = grad_activations * self._d_activation_function(self.hidden_layers[i].activations)
+            
+            if i == 0: layer_inputs = X 
+            else: layer_inputs = self.hidden_layers[i - 1].activations
+            
+            grad_weights = layer_inputs.T @ local_delta
+            if self.apply_regularization: grad_weights += self.regularization_coef * np.sign(self.hidden_layers[i].incoming_weights)
+            
+            grad_biases = np.sum(local_delta, axis=0)
+            hidden_grads.append((grad_weights, grad_biases))
+            upstream_delta = local_delta
             
         parts: list[np.ndarray] = []
         for dW, db in reversed(hidden_grads):
@@ -206,10 +232,22 @@ def main() -> None:
     
     X_train, X_test, y_train, y_test = load_mnist()
 
-    nn = NeuralNetwork(hidden_layers=[256, 10], n_inputs=X_train.shape[1], n_outputs=y_train.shape[1], activation_f_type="Tanh", task="multiclass", learning_rate=0.001)
-    nn.train(X_train.values, y_train.values, epochs=10, batch_size=64, optimizer="adam")
+    X_train_scaled = X_train.values / 255.0
+    X_test_scaled = X_test.values / 255.0
 
-    predictions = nn.predict(X_test.values)
+    nn = NeuralNetwork(
+        hidden_layers=[128, 64], 
+        n_inputs=X_train_scaled.shape[1], 
+        n_outputs=y_train.shape[1], 
+        activation_f_type="ReLu", 
+        task="multiclass", 
+        learning_rate=0.001,
+        apply_regularization=True,
+        regularization_coef=1e-6
+    )
+
+    nn.train(X_train_scaled, y_train.values, epochs=20, batch_size=64, optimizer="adam")
+    predictions = nn.predict(X_test_scaled)
 
     pred_classes = np.argmax(predictions, axis=1)
     true_classes = np.argmax(y_test.values, axis=1)

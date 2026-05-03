@@ -33,6 +33,7 @@ class UOSolver:
         self.alpha = lr
         self.f = f
         self.g = g if g is not None else jax.grad(f)
+        self.current_g = np.zeros(dimensions)
         self.h = h if h is not None else jax.hessian(f)
         self.epsilon = epsilon
         self.max_iter = max_iter
@@ -45,9 +46,16 @@ class UOSolver:
         self.alpha_min = alpha_min
         self.wolf_c1 = wolf_c1
         self.wolf_c2 = wolf_c2
-        self.H = H if H is not None else np.eye(dimensions)
-        self.bfgs_s = np.zeros(dimensions)
-        self.bfgs_y = np.zeros(dimensions)
+        if self.direction == "bfgs":
+            self.H = H if H is not None else np.eye(dimensions)
+            self.bfgs_s = np.zeros(dimensions)
+            self.bfgs_y = np.zeros(dimensions)
+            self.prev_g = np.zeros(dimensions) 
+        else:
+            self.H = None 
+            self.bfgs_s = None
+            self.bfgs_y = None
+            self.prev_g = None
         self.bfgs_rho = 0.0
         self.adam_alpha = adam_alpha
         self.beta1_adam = beta1_adam
@@ -97,7 +105,7 @@ class UOSolver:
 
         d = self.H @ gradient
         self.bfgs_s = self.x - self.x_1
-        self.bfgs_y = gradient - self.g(self.x_1)
+        self.bfgs_y = gradient - self.prev_g
         rho_denom = np.dot(self.bfgs_y, self.bfgs_s)
         if abs(rho_denom) > 1e-10:
             self.bfgs_rho = 1.0 / rho_denom
@@ -140,20 +148,25 @@ class UOSolver:
         """Returns whether self.alpha is in Acceptability Conditions"""
         
         x_new = self.x - self.alpha * self.d
-        wc1 = self.f(x_new) <= self.f(self.x) - self.wolf_c1 * self.alpha * np.dot(self.g(self.x), self.d)
-        wc2 = abs(np.dot(self.g(x_new), self.d)) <= self.wolf_c2 * abs(np.dot(self.g(self.x), self.d))
+        current_grad_dot_d = np.dot(self.current_g, self.d)
+        wc1 = self.f(x_new) <= self.current_f - self.wolf_c1 * self.alpha * current_grad_dot_d
+        wc2 = abs(np.dot(self.g(x_new), self.d)) <= self.wolf_c2 * abs(current_grad_dot_d)
+        
         return wc1 and wc2
     
     def _backtracking_line_search(self) -> float:
         """Performs BLS to find optimal or good alpha"""
 
         self.alpha = self.alpha_max
+        self.current_f = self.f(self.x)
         while self.alpha > self.alpha_min and not self._is_in_ac():
             self.alpha *= self.bls_rho
         return self.alpha
 
     def step(self, gradient: np.ndarray) -> tuple[np.ndarray, float]:
         """Returns direction vector and step length for a given gradient"""
+
+        self.current_g = gradient
 
         if self.direction == "adam":
             self.d = self.get_direction_adam(gradient)
@@ -174,6 +187,7 @@ class UOSolver:
             self.d = self.get_direction_newton_cg(gradient)
             self.alpha = self._backtracking_line_search()
 
+        self.prev_g = self.current_g.copy()
         return self.d, self.alpha
 
 
